@@ -75,7 +75,7 @@ def _init_LNMMSB_state(N, K, key=0, B=None, mu=None, Sigma=None, gamma_tilde=Non
     if Sigma_tilde is None:
         Sigma_tilde = jnp.tile(Sigma[None, :, :], (N, 1, 1))  # shape (N,K,K)   
     
-    return LNMMSB_State(N=N, K=K, B=B, mu=mu, Sigma=Sigma)
+    return LNMMSB_State(N=N, K=K, B=B, mu=mu, Sigma=Sigma, gamma_tilde=gamma_tilde, Sigma_tilde=Sigma_tilde, delta=None)
 
 
 @jit
@@ -307,8 +307,9 @@ class jit_LNMMSB():
         
                 g, H = _compute_g_H(self.state.gamma_tilde, self.state.K) # g: (N,K), H: (N,K,K)
                 new_Sigma_tilde = _update_sigma_tilde(Sigma_inv, H, self.state.N) # shape (N,K,K)
+                self.state = self.state.replace(Sigma_tilde=new_Sigma_tilde)
                 new_gamma_tilde = _update_gamma_tilde(self.state, g, H,) # shape (N,K)
-                self.state = self.state.replace(gamma_tilde=new_gamma_tilde, Sigma_tilde=new_Sigma_tilde)
+                self.state = self.state.replace(gamma_tilde=new_gamma_tilde)
                 # 2.2.3 update B
                 new_B = _update_B(self.state.delta, E) # shape (K,K)
 
