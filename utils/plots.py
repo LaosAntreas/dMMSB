@@ -11,15 +11,15 @@ def plot_roles(true_vectors, inferred_vectors=None, title=None):
     - inferred_vectors: (Optional) Array of shape (N, K).
     - title: Optional plot title.
     """
-    assert np.allclose(np.sum(true_vectors, axis=1), 1), \
+    assert np.allclose(np.sum(true_vectors, axis=-1), 1), \
         "True vectors should sum to 1 across roles."
-    assert true_vectors.shape[1] == 3, \
+    assert true_vectors.shape[-1] == 3, \
         "This plotting function only supports K=3."
 
     if inferred_vectors is not None:
-        assert np.allclose(np.sum(inferred_vectors, axis=1), 1), \
+        assert np.allclose(np.sum(inferred_vectors, axis=-1), 1), \
             "Inferred vectors should sum to 1 across roles."
-        assert inferred_vectors.shape[1] == 3, \
+        assert inferred_vectors.shape[-1] == 3, \
             "This plotting function only supports K=3."
 
     # Triangle vertices
