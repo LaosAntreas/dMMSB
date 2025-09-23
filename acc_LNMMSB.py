@@ -97,27 +97,26 @@ def _expand_gamma(gamma_km1, N): # FIX: Corrected argument name from Ν to N
 def _compute_deltas(gamma_tilde, B, E):
     '''
     Compute delta matrices for all pairs (i,j) given current gamma_tilde and B
-    gamma_tilde: (N,K)
-    B: (K,K)
+    gamma_tilde: (N,K) - NOTE: This should be K-dimensional (expanded)
     E: adjacency matrix (N,N)
     Returns: delta (N,N,K,K)
     '''
-    gamma_i = gamma_tilde[:, None, :, None]
-    gamma_j = gamma_tilde[None, :, None, :]
+    gamma_i = gamma_tilde[:, None, :, None] # shape (N,1,K,1)
+    gamma_j = gamma_tilde[None, :, None, :] # shape (1,N,1,K)
 
-    gamma_sum = gamma_i + gamma_j
+    gamma_sum = gamma_i + gamma_j # shape (N,N,K,K)
 
-    B_reshaped = B[None, None, :, :]
-    E_reshaped = E[:, :, None, None]
+    B_reshaped = B[None, None, :, :] # shape (1,1,K,K)
+    E_reshaped = E[:, :, None, None] # shape (N,N,1,1)
 
     log_bernoulli = jnp.where(E_reshaped == 1,
-                            jnp.log(B_reshaped + EPS),
-                            jnp.log1p(-B_reshaped + EPS))
+    jnp.log(B_reshaped + EPS),
+    jnp.log1p(-B_reshaped + EPS)) # log(1-B) more stable
 
-    delta_exp_term = gamma_sum + log_bernoulli
-    max_delta_exp = jnp.max(delta_exp_term, axis=(-1,-2), keepdims=True)
-    delta = jnp.exp(delta_exp_term - (max_delta_exp + logsumexp(delta_exp_term - max_delta_exp, axis=(-1,-2), keepdims=True)))
-    return delta
+    delta_exp_term = gamma_sum + log_bernoulli # shape (N,N,K,K)
+    delta = softmax(delta_exp_term, axis=(-1,-2)) # shape (N,N,K,K)
+    return delta # shape (N,N,K,K)
+
 
 def compute_g_H(gamma_hat, K):
     '''
@@ -125,8 +124,7 @@ def compute_g_H(gamma_hat, K):
     gamma_hat: (N, K)
     Returns: g: (N, K), H: (N, K, K)
     '''
-    max_gamma = jnp.max(gamma_hat, axis=-1, keepdims=True)
-    g = jnp.exp(gamma_hat - (max_gamma + logsumexp(gamma_hat - max_gamma, axis=-1, keepdims=True)))
+    g = softmax(gamma_hat, axis=-1) # shape (N,K)
     H = jnp.einsum('ni,ij->nij', g, jnp.eye(K)) - jnp.einsum('ni,nj->nij', g, g)
     
     return g, H
