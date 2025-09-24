@@ -1,21 +1,11 @@
 import jax
 import jax.numpy as jnp
-import jax.scipy as jsp
-from jax.scipy.special import logsumexp
 from jax.nn import softmax
-
-import tqdm
 
 from jax import vmap, jit
 from jax.tree_util import register_pytree_node_class
-from functools import partial
-
-import networkx as nx
-import numpy as np
-import matplotlib.pyplot as plt
 
 EPS = 1e-10
-
 
 @register_pytree_node_class
 class dMMSB_State:
@@ -93,7 +83,7 @@ def init_dMMSB_state(N, K, T, key=None, B=None, mu=None, Sigma=None, Phi=None, n
         Sigma = jnp.tile(jnp.eye(K - 1)[None, :, :], (T, 1, 1)) * 10 #shape (T, K-1, K-1)
 
     #KF RTS variables
-    P = jnp.tile(jnp.eye(K - 1)[None, :, :], (T, 1, 1)) * 20 #shape (T, K-1, K-1) | NOTE: large initial covariance
+    P = jnp.tile(jnp.eye(K - 1)[None, :, :], (T, 1, 1)) * 20 #shape (T, K-1, K-1) | NOTE: set large initial covariance
     Y = None
     L = None
 
@@ -112,7 +102,6 @@ def _expand_gamma(gamma_km1, N):
 #--------------------------------------------------------------
 # Inner Loop functions (From static version)
 #--------------------------------------------------------------
-
 
 def _compute_deltas(gamma_tilde, B, E):
     '''
@@ -260,7 +249,6 @@ def _inner_step(gamma_tilde, Sigma_tilde, mu, Sigma_inv, B, E, N, K):
     Sigma_tild: (T,N,K-1,K-1)
     delta: (T,N,N,K,K)
     '''
-
     gamma_tilde, Sigma_tilde, delta = vmap(_inner_step_static, in_axes=(0,0,0,0,None,0,None,None))(gamma_tilde, Sigma_tilde, mu, Sigma_inv, B, E, N, K)
     return gamma_tilde, Sigma_tilde, delta
 
@@ -343,7 +331,7 @@ def _update_mu_P_L(mu, P, Y, Sigma, Phi, N):
 
 def _update_B(delta, E):
     '''
-    Update B using the current parameters. eq (26)
+    Update B. eq (26)
     delta: shape (T,N,N,K,K)
     E: shape (T,N,N)
     '''
@@ -355,7 +343,7 @@ def _update_B(delta, E):
     B_new = jnp.where(den < EPS, 
                 0.5 * jnp.ones_like(num),  
                 num / jnp.maximum(den, EPS)) # shape (K,K)
-    B_new = jnp.clip(B_new, 1e-6, 1 - 1e-6)
+    B_new = jnp.clip(B_new, 1e-6, 1 - 1e-6) 
 
     return B_new
 
@@ -401,11 +389,11 @@ def _update_nu(mu):
     Update nu using the current parameters. eq (21)
     mu: shape (T,K-1)
     '''
-    return mu[0]  # Return first time step mu (still K-1 dimensional)
+    return mu[0] 
 
 def init_q_gamma(state: dMMSB_State):
     '''
-    Initialize q(gamma) and Sigma^-1 for all time steps.
+    Initialize q(gamma) and Sigma^-1 for all time steps. 
     state: dMMSB_State
     Returns: gamma_tilde (T,N,K-1), Sigma_tilde (T,N,K-1,K-1), Sigma_inv (T,K-1,K-1)
     '''
@@ -437,20 +425,24 @@ def init_q_gamma(state: dMMSB_State):
     return state.replace(gamma_tilde=gamma_tilde, Sigma_tilde=Sigma_tilde, delta=delta_init), Sigma_inv # Update state with new key and initialized values
 
 
-
 # --- Jitted Step Functions ---
 
 def e_step_inner_updates(state: dMMSB_State, Sigma_inv, E):
     """Jitted E-step inner loop updates."""
     gamma_tilde_new, Sigma_tilde_new, delta_new = _inner_step(state.gamma_tilde, state.Sigma_tilde, state.mu, Sigma_inv, state.B, E, state.N, state.K)
-   
     B_new = _update_B(delta_new, E) 
 
     return state.replace(gamma_tilde=gamma_tilde_new, Sigma_tilde=Sigma_tilde_new, delta=delta_new, B=B_new)
 
 @jit   
 def inner_loop(state: dMMSB_State, E, max_inner_iters=100, tol=1e-6):
-    """Run the inner loop of the E-step until convergence."""
+    """
+    Run the inner loop of the E-step until convergence.
+    state: dMMSB_State
+    E: adjacency matrix (T,N,N)
+    max_inner_iters: maximum iterations for the inner loop
+    tol: convergence tolerance
+    """
     i = 0 
     d_ll = jnp.inf
     prev_ll = -jnp.inf
@@ -469,13 +461,11 @@ def inner_loop(state: dMMSB_State, E, max_inner_iters=100, tol=1e-6):
         ll = log_likelihood(state.delta, state.B, E)
         d_ll = jnp.abs(ll - prev_ll)
         prev_ll = ll
-
-        #jax.debug.print("  [inner {}/{}] ll: {:.4f}, d_ll: {:.6f}", i, max_inner_iters, ll, d_ll)
         return state, i, d_ll, prev_ll
     
     init_carry = (state, i, d_ll, prev_ll)
-
     state, i, d_ll, prev_ll = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    
     return state, prev_ll
 
 @jit
@@ -486,6 +476,7 @@ def m_step_outer_updates(state: dMMSB_State):
     nu = _update_nu(mu)
     Phi = _update_Phi(mu, P, L, state.K)
     Sigma = _update_Sigma(mu, state.gamma_tilde, state.Sigma_tilde, state.N, state.K)
+    
     return state.replace(Y=Y, mu=mu, P=P, L=L, nu=nu, Phi=Phi, Sigma=Sigma)
 
 @jit    
@@ -499,16 +490,42 @@ def log_likelihood(delta, B, E):
     E_reshaped = E[:, :, :, None, None] # shape (T,N,N,1,1)
     B_reshaped = B[None, None, None, :, :] # shape (1,1,1,K,K)
     logB = jnp.log(B_reshaped + EPS) # shape (1,1,1,K,K)
-    log1mB = jnp.log(1.0 - B_reshaped + EPS) # shape (1,1,1,K,K)
+    log1mB = jnp.log1p(- B_reshaped + EPS) # shape (1,1,1,K,K)
 
-    ll_matrix = delta * (E_reshaped * logB + (1.0 - E_reshaped) * log1mB) # shape (T,N,N,K,K)
+    #ll_matrix = delta * (E_reshaped * logB + (1.0 - E_reshaped) * log1mB) # shape (T,N,N,K,K)
+    ll_matrix = jnp.where(E_reshaped == 0, log1mB * delta, delta * logB) # shape (T,N,N,K,K)
     ll = jnp.sum(ll_matrix)
     return ll
+
+# ------------------------------
+
+def find_best_initialization(state: dMMSB_State, E, trials=5):
+    '''
+    Run multiple trials of the inner loop with different random initializations and return the best state.
+    state: dMMSB_State
+    E: adjacency matrix (T,N,N)
+    trials: number of random initializations
+    Returns: best_state: dMMSB_State, best_ll: scalar
+    '''
+    def single_trial(state, E):
+        state, inner_ll = inner_loop(state, E, 100, tol=1e-6)
+        return state, inner_ll
+    
+    #init states with different keys
+    keys = jax.random.split(state.key, trials)
+    states = vmap(lambda k: state.replace(key=k))(keys)
+    vmap_trial = vmap(single_trial, in_axes=(0, None), out_axes=(0,0))(states, E)
+    states, lls = vmap_trial
+    best_idx = jnp.argmax(lls)
+    
+    # Index into the PyTree to get the best state
+    best_state = jax.tree_util.tree_map(lambda x: x[best_idx], states)
+    return best_state, lls[best_idx]
 
 # --- Public API ---
 
 class jitdMMSB:
-    """A JAX-accelerated implementation of the dMMSB model."""
+    """Implementation of the dMMSB model."""
 
     def __init__(self, nodes, roles, timesteps, **kwargs):
         self.N = nodes
@@ -518,32 +535,30 @@ class jitdMMSB:
         self.state = init_dMMSB_state(self.N, self.K, self.T, key=key_seed, **kwargs)
 
     def fit(self, E, max_inner_iters=100, max_outer_iters=100, tol=1e-6, verbose=False):
+        '''
+        Fit the dMMSB model to the data E using variational EM.
+        E: adjacency matrix (T,N,N)
+        max_inner_iters: maximum iterations for the inner loop
+        max_outer_iters: maximum iterations for the outer loop
+        tol: convergence tolerance
+        verbose: whether to print progress of outer loop
+        Returns: final log likelihood
+        '''
+        assert E.shape == (self.T, self.N, self.N), f"Expected E shape {(self.T, self.N, self.N)}, got {E.shape}"
+        assert jnp.all(jnp.isin(E, jnp.array([0, 1]))), "E must be a binary adjacency matrix."
         i = 0 
         d_ll = jnp.inf
         prev_outer_ll = -jnp.inf
 
+        # Multiple random initializations to avoid poor local minima
+        initial_state, outer_ll = find_best_initialization(self.state, E, trials=5)
+        self.state = initial_state
 
+        # Outer Loop
         while(d_ll > tol and i < max_outer_iters):
-            
-            # Initialize q(gamma) for the E-step   
-            self.state, Sigma_inv = init_q_gamma(self.state)
-
-            # Inner Loop
-
+            # Inner Loop (E-Step)
             self.state, inner_ll = inner_loop(self.state, E, max_inner_iters, tol)
-            # j = 0
-            # inner_d_ll = jnp.inf
-            # prev_inner_ll = -jnp.inf
-            # while(inner_d_ll > tol and j < max_inner_iters):
-            #     self.state = e_step_inner_updates(self.state, Sigma_inv, E)
 
-            #     j += 1
-            #     inner_ll = log_likelihood(self.state.delta, self.state.B, E)
-            #     inner_d_ll = jnp.abs(inner_ll - prev_inner_ll)
-            #     prev_inner_ll = inner_ll
-            #     if verbose:
-            #         print(f"  [inner {j}] ll: {inner_ll:.4f}, d_ll: {inner_d_ll:.6f}")
-            
             # M-Step
             self.state = m_step_outer_updates(self.state)
 
@@ -553,7 +568,8 @@ class jitdMMSB:
             d_ll = jnp.abs(outer_ll - prev_outer_ll)
             prev_outer_ll = outer_ll
             if verbose:
-                print(f"[outer {i}] ll: {outer_ll:.4f}, d_ll: {d_ll:.6f}")
+                msg = f"[outer {i}/{max_outer_iters}] ll: {outer_ll:.4f}, d_ll: {d_ll:.6f}"
+                print(msg, end="\r", flush=True)    
         return outer_ll
     
     def generate_graph(self):
@@ -630,14 +646,15 @@ class jitdMMSB:
 
             keys = jax.random.split(key, self.T - 1)
             _, mu_rest = jax.lax.scan(sample_mu_step, mu_0, keys)
-            self.mu = jnp.concatenate([mu_0[None, :], mu_rest], axis=0)
+            mu = jnp.concatenate([mu_0[None, :], mu_rest], axis=0)
             
             def sample_gamma_t(key_t, mu_t, Sigma_t):
                 return jax.random.multivariate_normal(key_t, mu_t, Sigma_t, shape=(self.N,))
 
             key, subkey = jax.random.split(key)
             keys = jax.random.split(subkey, self.T)
-            self.gamma_tilde = vmap(sample_gamma_t)(keys, self.mu, self.Sigma)
+            gamma_tilde = vmap(sample_gamma_t)(keys, self.mu, self.Sigma)
+            self.state = self.state.replace(gamma_tilde=gamma_tilde, mu=mu, key=key)
         
         gamma_expanded = vmap(_expand_gamma, in_axes=(0, None))(self.gamma_tilde, self.state.N) # shape (T,N,K)
         pis = softmax(gamma_expanded, axis=-1) # shape (T,N,K)
@@ -647,7 +664,7 @@ class jitdMMSB:
             z_ij = jax.random.multinomial(subkey1, 1, pis_t, shape=(self.state.N, self.state.N, self.state.K)) # shape (N,N,K)
             z_ji = jax.random.multinomial(subkey2, 1, pis_t, shape=(self.state.N, self.state.N, self.state.K)) # shape (N,N,K)
 
-            p = jnp.einsum('ijk, kl -> ijl', z_ij, self.B) # shape (N,N,K)
+            p = jnp.einsum('ijk, kl -> ijl', z_ij, self.state.B) # shape (N,N,K)
             p = jnp.einsum('ijl, jil -> ij', p, z_ji) # shape (N,N)
             E_t = jax.random.bernoulli(subkey3, p=p)
             return E_t
@@ -673,3 +690,5 @@ class jitdMMSB:
     def Phi(self): return self.state.Phi
     @property
     def key(self): return self.state.key
+
+    
