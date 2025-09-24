@@ -51,3 +51,20 @@ def plot_roles(true_vectors, inferred_vectors=None, title=None):
         plt.title(title)
     plt.legend()
     plt.show()
+
+
+def plot_adjacency_matrix(adj_matrix, title=None):
+    """
+    Plots the adjacency matrix of a graph.
+    
+    Parameters:
+    - adj_matrix: 2D numpy array representing the adjacency matrix.
+    - title: Optional plot title.
+    """
+    assert adj_matrix.ndim == 2 and adj_matrix.shape[0] == adj_matrix.shape[1], \
+        "Adjacency matrix must be square (2D)."
+    plt.figure(figsize=(6,6))
+    plt.imshow(adj_matrix, cmap='Greys', interpolation='none')
+    if title:
+        plt.title(title)
+    plt.show()

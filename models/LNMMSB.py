@@ -425,7 +425,7 @@ class jitLNMMSB:
         Returns: adjacency matrix (N,N)
         '''
         key, subkey_1, subkey_2, subkey_3, subkey_4 = jax.random.split(self.state.key, 5)
-        if self.state.gamma_tilde is None:
+        if jnp.all(self.state.gamma_tilde == jnp.zeros_like(self.state.gamma_tilde)):
             assert self.state.mu is not None and self.state.Sigma is not None, "Must initialize mu and Sigma before generating a graph if gamma_tilde is not set."
 
             gamma_tilde= jax.random.multivariate_normal(subkey_1, self.state.mu, self.state.Sigma, (self.state.N,)) # shape (N,K)
