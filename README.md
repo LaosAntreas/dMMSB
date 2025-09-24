@@ -17,7 +17,7 @@ This repository provides JAX implementations for both dynamic (dMMSB) and static
 To run the examples, you need to install the required Python packages.
 
 ```bash
-pip install jax jaxlib networkx matplotlib
+pip install jax jaxlib matplotlib
 ```
 
 ## Usage
