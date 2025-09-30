@@ -151,7 +151,7 @@ def _update_sigma_tilde(Sigma_inv, H, N, K):
     
     factor = 2.0 * N - 2.0
     A = Sigma_inv[None, :, :] + factor * H_km1
-    jitter = EPS * jnp.eye(K - 1) # for numerical stability
+    jitter = 1e-6 * jnp.eye(K - 1) # for numerical stability
     A = A + jitter[None, :, :]
     Sigma_tilde = jnp.linalg.inv(A)
     return Sigma_tilde
@@ -212,7 +212,7 @@ def _update_gamma_tilde(delta, mu, Sigma_tilde, gamma_hat, g, H, N, K):
 
     return gamma_tilde # shape (N, K-1)
 
-def _inner_step_static(gamma_tilde, Sigma_tilde, mu, Sigma_inv, B, E, N, K):
+def _inner_step_static(gamma_tilde, mu, Sigma_inv, B, E, N, K):
     '''
     Perform one inner iteration to update gamma_tilde and Sigma_tilde
     gamma_tilde: (N,K-1)
@@ -249,7 +249,7 @@ def _inner_step(gamma_tilde, Sigma_tilde, mu, Sigma_inv, B, E, N, K):
     Sigma_tild: (T,N,K-1,K-1)
     delta: (T,N,N,K,K)
     '''
-    gamma_tilde, Sigma_tilde, delta = vmap(_inner_step_static, in_axes=(0,0,0,0,None,0,None,None))(gamma_tilde, Sigma_tilde, mu, Sigma_inv, B, E, N, K)
+    gamma_tilde, Sigma_tilde, delta = vmap(_inner_step_static, in_axes=(0,0,0,None,0,None,None))(gamma_tilde, mu, Sigma_inv, B, E, N, K)
     return gamma_tilde, Sigma_tilde, delta
 
 def _update_mu_P_L(mu, P, Y, Sigma, Phi, N):
@@ -407,35 +407,42 @@ def init_q_gamma(state: dMMSB_State):
                 key, subkey = jax.random.split(key)
                 gamma_tilde = jax.random.multivariate_normal(subkey, mu_t, Sigma_t, shape=(N,)) # shape (N,K-1)
                 gamma_tilde = jnp.clip(gamma_tilde, -10, 10)  # gradient clipping
-                # Expand for g,H computation
-                gamma_hat = _expand_gamma(gamma_tilde, N) # shape (N, K)
-                g, H = _compute_g_H(gamma_hat, K) # g: (N,K), H: (N,K,K)
-
-                jitter = 1e-5 * jnp.eye(K - 1) # for numerical stability
-                Sigma_inv = jnp.linalg.inv(Sigma_t + jitter) # shape (K-1,K-1)
-                Sigma_tilde = _update_sigma_tilde(Sigma_inv, H, N, K) # shape (N,K-1,K-1)
-
-                return gamma_tilde, Sigma_tilde, Sigma_inv
+    
+                return gamma_tilde
     
     # Initialize delta with zeros of the correct shape before the loop
     delta_init = jnp.zeros((state.T, state.N, state.N, state.K, state.K))
+    Sigma_tilde_init = jnp.zeros((state.T, state.N, state.K - 1, state.K - 1))
 
-    gamma_tilde, Sigma_tilde, Sigma_inv = vmap(init_q_gamma_static, in_axes=(None, 0, 0, None, None))(state.key, state.mu, state.Sigma, state.N, state.K) # shape (T,N,K-1), (T,N,K-1,K-1), (T,K-1,K-1)
+    gamma_tilde = vmap(init_q_gamma_static, in_axes=(None, 0, 0, None, None))(state.key, state.mu, state.Sigma, state.N, state.K) # shape (T,N,K-1), (T,N,K-1,K-1), (T,K-1,K-1)
 
-    return state.replace(gamma_tilde=gamma_tilde, Sigma_tilde=Sigma_tilde, delta=delta_init), Sigma_inv # Update state with new key and initialized values
+    return state.replace(gamma_tilde=gamma_tilde, Sigma_tilde=Sigma_tilde_init, delta=delta_init) # Update state with new key and initialized values
 
 
 # --- Jitted Step Functions ---
 
 def e_step_inner_updates(state: dMMSB_State, Sigma_inv, E):
-    """Jitted E-step inner loop updates."""
-    gamma_tilde_new, Sigma_tilde_new, delta_new = _inner_step(state.gamma_tilde, state.Sigma_tilde, state.mu, Sigma_inv, state.B, E, state.N, state.K)
-    B_new = _update_B(delta_new, E) 
+    """
+    Jitted E-step inner loop updates. 
+    Update gamma_tilde and Sigma_tilde for all time steps using vmap
+    state: dMMSB_State
+    Sigma_inv: (T,K-1,K-1)
+    E: adjacency matrix (T,N,N)
+    Returns: updated state with new gamma_tilde, Sigma_tilde, delta, B
+    """
+    gamma_tilde, Sigma_tilde, delta = vmap(_inner_step_static, in_axes=(0,0,0,None,0,None,None))(state.gamma_tilde, 
+                                                                                                   state.mu, 
+                                                                                                   Sigma_inv, 
+                                                                                                   state.B,
+                                                                                                   E, 
+                                                                                                   state.N, 
+                                                                                                   state.K)
+    B = _update_B(delta, E) 
 
-    return state.replace(gamma_tilde=gamma_tilde_new, Sigma_tilde=Sigma_tilde_new, delta=delta_new, B=B_new)
+    return state.replace(gamma_tilde=gamma_tilde, Sigma_tilde=Sigma_tilde, delta=delta, B=B)
 
 @jit   
-def inner_loop(state: dMMSB_State, E, max_inner_iters=100, tol=1e-6):
+def inner_loop(state: dMMSB_State, Sigma_inv, E, max_inner_iters=100, tol=1e-6):
     """
     Run the inner loop of the E-step until convergence.
     state: dMMSB_State
@@ -446,8 +453,6 @@ def inner_loop(state: dMMSB_State, E, max_inner_iters=100, tol=1e-6):
     i = 0 
     d_ll = jnp.inf
     prev_ll = -jnp.inf
-
-    state, Sigma_inv = init_q_gamma(state) # Re-initialize q(gamma) at the start of the inner loop
  
     def cond_fn(carry):
         state, i, d_ll, prev_ll = carry
@@ -507,17 +512,21 @@ def find_best_initialization(state: dMMSB_State, E, trials=5):
     trials: number of random initializations
     Returns: best_state: dMMSB_State, best_ll: scalar
     '''
-    def single_trial(state, E):
-        state, inner_ll = inner_loop(state, E, 100, tol=1e-6)
+    def single_trial(state, Sigma_inv, E):
+        state = init_q_gamma(state) # Re-initialize q(gamma) at the start of the inner loop
+        state, inner_ll = inner_loop(state, Sigma_inv, E, 500, tol=1e-3)
         return state, inner_ll
+    
+    jitter = 1e-6 * jnp.eye(state.K - 1) # for numerical stability
+    Sigma_inv = jnp.linalg.inv(state.Sigma + jitter[None, :, :]) # shape (T,K-1,K-1)
     
     #init states with different keys
     keys = jax.random.split(state.key, trials)
     states = vmap(lambda k: state.replace(key=k))(keys)
-    vmap_trial = vmap(single_trial, in_axes=(0, None), out_axes=(0,0))(states, E)
+    vmap_trial = vmap(single_trial, in_axes=(0, None, None))(states, Sigma_inv, E)
     states, lls = vmap_trial
     best_idx = jnp.argmax(lls)
-    
+
     # Index into the PyTree to get the best state
     best_state = jax.tree_util.tree_map(lambda x: x[best_idx], states)
     return best_state, lls[best_idx]
@@ -551,13 +560,17 @@ class jitdMMSB:
         prev_outer_ll = -jnp.inf
 
         # Multiple random initializations to avoid poor local minima
-        initial_state, outer_ll = find_best_initialization(self.state, E, trials=5)
+        initial_state, outer_ll = find_best_initialization(self.state, E, trials=20)
         self.state = initial_state
-
+        if verbose:
+            print("Best initialization log-likelihood:", outer_ll)
         # Outer Loop
         while(d_ll > tol and i < max_outer_iters):
             # Inner Loop (E-Step)
-            self.state, inner_ll = inner_loop(self.state, E, max_inner_iters, tol)
+            jitter = 1e-6 * jnp.eye(self.K - 1)
+            Sigma_inv = jnp.linalg.inv(self.state.Sigma + jitter[None, :, :])
+
+            self.state, inner_ll = inner_loop(self.state, Sigma_inv, E, max_inner_iters, tol)
 
             # M-Step
             self.state = m_step_outer_updates(self.state)
@@ -692,3 +705,482 @@ class jitdMMSB:
     def key(self): return self.state.key
 
     
+class dMMSB():
+    def __init__(self, nodes, roles, timesteps, **kwargs):
+        self.N = nodes
+        self.K = roles
+        self.T = timesteps
+
+        self.key = kwargs.get('key', jax.random.PRNGKey(0))
+        self.B = kwargs.get('B', None)
+        self.mu = kwargs.get('mu', None)
+        self.Sigma = kwargs.get('Sigma', None)
+        self.gamma_tilde = kwargs.get('gamma_tilde', None)
+        self.Sigma_tilde = kwargs.get('Sigma_tilde', None)
+        self.nu = kwargs.get('nu', None)
+        self.Phi = kwargs.get('Phi', None)
+
+        # Initialize model parameters 
+        if self.B is None:
+            self.B = jax.random.uniform(self.key, (self.K, self.K)) #shape (K,K)
+        if self.nu is None:
+            self.nu = jax.random.normal(self.key) # scalar
+        if self.mu is None:
+            self.mu = jnp.tile(jnp.zeros(self.K - 1)[None, :], (self.T, 1)) + self.nu  #shape (T, K-1)
+        if self.Phi is None:
+            self.Phi = jnp.eye(self.K - 1) * 20 #shape (K-1, K-1)
+        if self.Sigma is None:
+            self.Sigma = jnp.tile(jnp.eye(self.K - 1)[None, :, :], (self.T, 1, 1)) * 10 #shape (T, K-1, K-1)
+
+        # Changed: P is now (T, K-1, K-1) instead of (T, K, K)
+        #KF RTS variables
+        self.P = jnp.tile(jnp.eye(self.K - 1)[None, :, :], (self.T, 1, 1)) * 20 #shape (T, K-1, K-1) | NOTE: large initial covariance
+        self.Y = None
+        self.L = None
+
+        self.EPS = 1e-10
+
+    def expand_gamma(self, gamma_km1):
+        '''
+        Help function to expand gamma from K-1 to K by appending zeros
+        gamma_km1: (..., K-1) 
+        returns: (..., K)
+        '''
+        assert gamma_km1.shape[-1] == self.K - 1, f"Input gamma must have last dimension K-1={self.K-1}"
+        zeros = jnp.zeros(gamma_km1.shape[:-1] + (1,))
+        return jnp.concatenate([gamma_km1, zeros], axis=-1)
+        
+    def log_likelihood(self, delta, B, E):
+        '''
+        Compute the log likelihood of the data given the current parameters. eq (25)
+        delta: shape (T,N,N,K,K)
+        B: shape (K,K)
+        E: shape (T,N,N)
+        '''
+        E_reshaped = E[:, :, :, None, None] # shape (T,N,N,1,1)
+        B_reshaped = B[None, None, None, :, :] # shape (1,1,1,K,K)
+        logB = jnp.log(B_reshaped + self.EPS) # shape (1,1,1,K,K)
+        log1mB = jnp.log(1.0 - B_reshaped + self.EPS) # shape (1,1,1,K,K)
+
+        ll_matrix = delta * (E_reshaped * logB + (1.0 - E_reshaped) * log1mB) # shape (T,N,N,K,K)
+        ll = jnp.sum(ll_matrix)
+        return ll
+    
+    #--------------------------------------------------------------
+    # Inner Loop functions (From static version)
+    #--------------------------------------------------------------
+
+    def _compute_deltas(self, gamma_tilde, E):
+        '''
+        Compute delta matrices for all pairs (i,j) given current gamma_tilde and B
+        gamma_tilde: (N,K) - NOTE: This should be K-dimensional (expanded)
+        E: adjacency matrix (N,N)
+        Returns: delta (N,N,K,K)
+        '''
+        assert gamma_tilde.shape[1] == self.K, "gamma_tilde must have shape (N, K) for delta computation"
+        
+        gamma_i = gamma_tilde[:, None, :, None] # shape (N,1,K,1)
+        gamma_j = gamma_tilde[None, :, None, :] # shape (1,N,1,K)
+
+        gamma_sum = gamma_i + gamma_j # shape (N,N,K,K)
+
+        B_reshaped = self.B[None, None, :, :] # shape (1,1,K,K)
+        E_reshaped = E[:, :, None, None] # shape (N,N,1,1)
+
+        log_bernoulli = jnp.where(E_reshaped == 1,
+                                jnp.log(B_reshaped + self.EPS),
+                                jnp.log1p(-B_reshaped + self.EPS))  # log(1-B) more stable
+
+        delta_exp_term = gamma_sum + log_bernoulli # shape (N,N,K,K)
+        max_delta_exp = jnp.max(delta_exp_term, axis=(-1,-2), keepdims=True)
+        delta = jnp.exp(delta_exp_term - (max_delta_exp + logsumexp(delta_exp_term - max_delta_exp, axis=(-1,-2), keepdims=True))) # shape (N,N,K,K) logsumexp trick for numerical stability
+        return delta # shape (N,N,K,K)
+    
+    def _compute_g_H(self, gamma_hat):
+        '''
+        Compute g and H at gamma_hat
+        gamma_hat: (N, K)
+        Returns: g: (N, K), H: (N, K, K)
+        '''
+        assert gamma_hat.shape[1] == self.K, "gamma_hat must have shape (N, K)"
+        
+        max_gamma = jnp.max(gamma_hat, axis=-1, keepdims=True)
+        g = jnp.exp(gamma_hat - (max_gamma + logsumexp(gamma_hat - max_gamma, axis=-1, keepdims=True))) # shape (N,K)
+        H = jnp.einsum('ni,ij->nij', g, jnp.eye(self.K)) - jnp.einsum('ni,nj->nij', g, g) # shape (N,K,K)
+        
+        return g, H
+
+    def _update_sigma_tilde(self, Sigma_inv, H):
+        '''
+        Compute Sigma_tilde = (Sigma^{-1} + (2N-2) H_{1:K-1, 1:K-1})^{-1}
+        Sigma_inv: (K-1, K-1)
+        H: (N, K, K) Hessian from the K-dimensional expansion
+        Returns: Sigma_tilde: (N, K-1, K-1)
+        '''
+        # Take the top-left (K-1, K-1) block of the Hessian
+        H_km1 = H[:, :self.K - 1, :self.K - 1] # shape (N, K-1, K-1)
+        
+        factor = 2.0 * self.N - 2.0
+        A = Sigma_inv[None, :, :] + factor * H_km1
+        jitter = 1e-6 * jnp.eye(self.K - 1) # for numerical stability
+        A = A + jitter[None, :, :]
+        Sigma_tilde = jnp.linalg.inv(A)
+        return Sigma_tilde
+
+    def _compute_m_expect(self, delta):
+        '''
+        Compute m_expect per node: m_i,k = sum_{j != i} (E[z_i->j,k] + E[z_i<-j,k])
+        delta: (N,N,K,K)
+        Returns: m_expect: (N,K)
+        '''
+        z_ij = jnp.sum(delta, axis=-1) # shape (N,N,K) Expected z_i->j (sender)
+        z_ji = jnp.sum(delta, axis=-2) # shape (N,N,K) Expected z_i<-j (receiver)
+
+        z_ij_expected = jnp.sum(z_ij, axis=1) # shape (N,K)
+        z_ji_expected = jnp.sum(z_ji, axis=0) # shape (N,K)
+
+        z_sum = z_ij_expected + z_ji_expected# shape (N,K)
+
+        diag_ij = jnp.diagonal(z_ij, axis1=0, axis2=1).T # shape(N,K)
+        diag_ji = jnp.diagonal(z_ji, axis1=0, axis2=1).T # shape(N,K)
+    
+        m_expect = z_sum - diag_ij - diag_ji # shape (N,K)
+
+        return m_expect # shape (N,K)
+   
+    def _update_gamma_tilde(self, delta, mu, Sigma_tilde, gamma_hat, g, H):
+        '''
+        Update gamma_tilde using Laplace approximation
+        delta: (N,N,K,K)
+        mu: (K-1,)
+        Sigma_tilde: (N,K-1,K-1)
+        gamma_hat: (N,K)
+        g: (N,K)
+        H: (N,K,K)
+        Returns: gamma_tilde: (N,K-1)
+        '''
+        factor = 2.0 * self.N - 2.0
+
+        # m_expect is computed over all K roles and must not be truncated.
+        m_expect = self._compute_m_expect(delta) # shape (N, K)
+        
+        # Expand mu to K dimensions for the calculation
+        mu_expanded = jnp.append(mu, 0.0) # shape (K,)
+        
+        # The term in brackets from the paper's appendix is K-dimensional
+        # It uses all K-dimensional components: m_expect, g, H, gamma_hat, mu_expanded
+        term_1_full = (m_expect - factor * g + 
+                    factor * jnp.einsum('nij,nj->ni', H, gamma_hat) - 
+                    factor * jnp.einsum('nij,j->ni', H, mu_expanded)) # shape (N, K)
+
+        # Truncate the update vector to K-1 dimensions right before the final multiplication
+        term_1_km1 = term_1_full[:, :self.K - 1] # shape (N, K-1)
+
+        # Final update is in K-1 dimensional space
+        gamma_tilde = mu[None, :] + jnp.einsum('nij,nj->ni', Sigma_tilde, term_1_km1) # shape (N, K-1)
+
+        return gamma_tilde # shape (N, K-1)
+
+    def inner_step_static(self, gamma_tilde, Sigma_tilde, mu, Sigma_inv, E):
+        '''
+        Perform one inner iteration to update gamma_tilde and Sigma_tilde
+        gamma_tilde: (N,K-1)
+        Sigma_tilde: (N,K-1,K-1)
+        mu: (K-1,)
+        Sigma_inv: (K-1,K-1)
+        E: adjacency matrix (N,N)
+        Returns: updated gamma_tilde (N,K-1), Sigma_tilde (N,K-1,K-1), delta (N,N,K,K)
+        '''
+        # Expand gamma_tilde to K dimensions for delta computation
+        gamma_hat = self.expand_gamma(gamma_tilde) # shape (N, K)
+    
+        delta = self._compute_deltas(gamma_hat, E) # shape (N,N,K,K)
+        g, H = self._compute_g_H(gamma_hat) # g: (N,K), H: (N,K,K)
+        Sigma_tilde = self._update_sigma_tilde(Sigma_inv, H) # shape (N,K-1,K-1)
+        gamma_tilde = self._update_gamma_tilde(delta, mu, Sigma_tilde, gamma_hat, g, H) # shape (N,K-1)
+        return gamma_tilde, Sigma_tilde, delta
+
+    #--------------------------------------------------------------
+    
+    def inner_step(self, gamma_tilde, Sigma_tilde, mu, Sigma_inv, E):
+        '''
+        Perform one inner iteration to update gamma_tilde and Sigma_tilde for all time steps using vmap
+        gamma_tilde: (T,N,K-1)
+        Sigma_tilde: (T,N,K-1,K-1)
+        mu: (T,K-1)
+        Sigma_inv: (T,K-1,K-1)
+        E: adjacency matrix (T,N,N)
+        Returns: updated 
+        gamma_tilde (T,N,K-1)
+        Sigma_tilde (T,N,K-1,K-1)
+        delta (T,N,N,K,K)
+        '''
+
+        gamma_tilde, Sigma_tilde, delta = vmap(self.inner_step_static, in_axes=(0,0,0,0,0))(gamma_tilde, Sigma_tilde, mu, Sigma_inv, E)
+        return gamma_tilde, Sigma_tilde, delta
+
+    def update_mu(self, mu, P, Y, Sigma, Phi, N):
+        '''
+        Update mu using Kalman filter and RTS smoother with jax.lax.scan. eq (14,15,16,17)
+        mu: shape (T,K-1) 
+        P: shape (T,K-1,K-1)
+        Y: shape (T,K-1)
+        Sigma: shape (T,K-1,K-1) 
+        Phi: shape (K-1,K-1) 
+        N: scalar, number of nodes
+        '''
+        T = mu.shape[0]
+
+        # --- 1. Kalman Filter (Forward Pass) ---
+        def kalman_step(carry, inputs):
+            mu_prev, P_prev = carry
+            Y_t, Sigma_t = inputs
+
+            # Prediction step
+            mu_pred_t = mu_prev
+            P_pred_t = P_prev + Phi
+
+            # Update step
+            tmp = P_pred_t + Sigma_t/N
+            K_t = jnp.linalg.solve(tmp.T, P_pred_t.T).T  #numerically stable version
+            mu_t = mu_pred_t + K_t @ (Y_t - mu_pred_t)
+            P_t = P_pred_t - K_t @ P_pred_t
+
+            new_carry = (mu_t, P_t)
+            # Stack filtered and predicted states for the backward pass
+            outputs_to_stack = (mu_t, P_t, mu_pred_t, P_pred_t)
+            return new_carry, outputs_to_stack
+
+        init_carry = (mu[0], P[0])
+        inputs = (Y[1:], Sigma[1:])
+        _, (mu_filtered_scanned, P_filtered_scanned, mu_pred_scanned, P_pred_scanned) = jax.lax.scan(
+            kalman_step, init_carry, inputs, unroll=True
+        )
+
+        # Combine initial state with scanned results
+        mu_filtered = jnp.concatenate([mu[0][None, :], mu_filtered_scanned], axis=0)
+        P_filtered = jnp.concatenate([P[0][None, :, :], P_filtered_scanned], axis=0)
+        # The prediction for time t is mu_{t-1}, so mu_pred starts from mu_0
+        mu_pred = jnp.concatenate([mu[0][None, :], mu_pred_scanned], axis=0)
+        P_pred = jnp.concatenate([P[0][None, :, :], P_pred_scanned], axis=0)
+
+        # --- 2. RTS Smoother (Backward Pass) ---
+        def rts_smoother_step(carry, inputs):
+            mu_smooth_next, P_smooth_next = carry
+            mu_filtered_t, P_filtered_t, mu_pred_next, P_pred_next = inputs
+
+            L_t = jnp.linalg.solve(P_pred_next.T, P_filtered_t.T).T  # numerically stable version
+            
+            # Update step
+            mu_smooth_t = mu_filtered_t + L_t @ (mu_smooth_next - mu_pred_next)
+            P_smooth_t = P_filtered_t + L_t @ (P_smooth_next - P_pred_next) @ L_t.T
+
+            new_carry = (mu_smooth_t, P_smooth_t)
+            outputs_to_stack = (mu_smooth_t, P_smooth_t, L_t)
+            return new_carry, outputs_to_stack
+
+        init_carry_smooth = (mu_filtered[-1], P_filtered[-1])
+        inputs_smooth = (mu_filtered[:-1], P_filtered[:-1], mu_pred[1:], P_pred[1:])
+        
+        _, (mu_smooth_scanned, P_smooth_scanned, L_scanned) = jax.lax.scan(
+            rts_smoother_step, init_carry_smooth, inputs_smooth, reverse=True, unroll=True
+        )
+
+        mu_smooth = jnp.concatenate([mu_smooth_scanned, mu_filtered[-1][None, :]], axis=0)
+        P_smooth = jnp.concatenate([P_smooth_scanned, P_filtered[-1][None, :, :]], axis=0)
+        L = jnp.concatenate([L_scanned, jnp.zeros((1, P.shape[1], P.shape[2]))], axis=0)  # Last L is not defined
+
+        return mu_smooth, P_smooth, L 
+
+    def update_B(self, delta, E):
+        '''
+        Update B using the current parameters. eq (26)
+        delta: shape (T,N,N,K,K)
+        E: shape (T,N,N)
+        '''
+        E_reshaped = E[:, :, :, None, None] # shape (T,N,N,1,1)
+        
+        num = jnp.sum(delta * E_reshaped, axis=(0,1,2)) # shape (K,K)
+        den = jnp.sum(delta, axis=(0,1,2)) # shape (K,K)
+
+        B_new = jnp.where(den < self.EPS, 
+                  0.5 * jnp.ones_like(num),  
+                  num / jnp.maximum(den, self.EPS)) # shape (K,K)
+        B_new = jnp.clip(B_new, 1e-6, 1 - 1e-6)
+
+        return B_new
+    
+    def update_Phi(self, mu, P, L):
+        """
+        Vectorized update of Phi using eq (19).
+        mu: shape (T, K-1)
+        P: shape (T, K-1, K-1)
+        L: shape (T, K-1, K-1)
+        """
+        diffs = mu[1:] - mu[:-1]  
+
+        term1 = jnp.einsum("ti,tj->tij", diffs, diffs) # shape (T-1, K-1, K-1)
+        term2 = jnp.einsum("tik,tkl,tjl->tij", L[:-1], P[1:], L[:-1]) # shape (T-1, K-1, K-1)
+
+        Phi_new = (term1 + term2).mean(axis=0)
+        # Ensure positive definiteness
+        Phi_new = Phi_new + jnp.eye(self.K - 1) * self.EPS  
+        return Phi_new
+
+    def update_Sigma(self, mu, gamma_tilde, Sigma_tilde, N):
+        '''
+        Update Sigma_tilde using the current parameters. eq (20)
+        mu: shape (T,K-1)
+        gamma_tilde: shape (T,N,K-1)
+        Sigma_tilde: shape (T,N,K-1,K-1)
+        N: scalar, number of nodes
+        '''
+        
+        diff = mu[:, None, :] - gamma_tilde # shape (T,N,K-1)
+        
+        sum_outer_products = jnp.einsum('tnk,tnj->tkj', diff, diff)  # shape (T,K-1,K-1) 
+
+        sum_Sigma_tilde = jnp.sum(Sigma_tilde, axis=1)  # shape (T,K-1,K-1)
+
+        Sigma_new = (sum_outer_products + sum_Sigma_tilde) / N  # shape (T,K-1,K-1)
+    
+
+        if (not jnp.allclose(Sigma_new, jnp.transpose(Sigma_new, (0,2,1)), atol=1e-6)):
+            print("Warning: Sigma_new is not symmetric!")
+
+        Sigma_new = Sigma_new + jnp.eye(self.K - 1)[None, :, :] * 1e-5 # Ensure positive definiteness
+        return Sigma_new
+    
+    def update_nu(self, mu):
+        '''
+        Update nu using the current parameters. eq (21)
+        mu: shape (T,K-1)
+        '''
+        return mu[0]  # Return first time step mu (still K-1 dimensional)
+    
+    def fit(self, E, max_inner_iters=100, max_outer_iters=100, tol=1e-6, verbose=False):
+        '''
+        Fit the model to adjacency matrix E using variational EM
+        Algorithm described in section 4.2 of the paper
+        
+        E: adjacency matrix (T,N,N)
+        max_inner_iters: maximum iterations for inner loop
+        max_outer_iters: maximum iterations for outer loop
+        tol: tolerance for convergence
+        verbose: whether to print progress
+        '''
+        
+        i = 0 
+        d_ll = jnp.inf
+        prev_outer_ll = -jnp.inf
+        while(d_ll > tol and i < max_outer_iters): # 2 (outer loop)
+            if verbose:
+                print(f"[outer {i}] mu: {self.mu}, Sigma diag: {jnp.diagonal(self.Sigma, axis1=1, axis2=2)}, B: {self.B}")
+
+            #initialize q(gamma) parameters
+            def init_q_gamma(key, mu_t, Sigma_t, N, K):
+                '''
+                Initialize q(gamma) and Sigma^-1 for a single time step.
+                mu_t: (K-1,)
+                Sigma_t: (K-1,K-1)
+                Returns: gamma_tilde (N,K-1), Sigma_tilde (N,K-1,K-1), Sigma_inv (K-1,K-1)
+                '''
+                key, subkey = jax.random.split(key)
+                gamma_tilde = jax.random.multivariate_normal(subkey, mu_t, Sigma_t, shape=(N,)) # shape (N,K-1)
+                gamma_tilde = jnp.clip(gamma_tilde, -10, 10)  # gradient clipping
+                # Expand for g,H computation
+                gamma_hat = self.expand_gamma(gamma_tilde) # shape (N, K)
+                g, H = self._compute_g_H(gamma_hat) # g: (N,K), H: (N,K,K)
+
+                jitter = 1e-6 * jnp.eye(K - 1) # for numerical stability
+                Sigma_inv = jnp.linalg.inv(Sigma_t + jitter) # shape (K-1,K-1)
+                Sigma_tilde = self._update_sigma_tilde(Sigma_inv, H) # shape (N,K-1,K-1)
+
+                return gamma_tilde, Sigma_tilde, Sigma_inv
+
+            self.gamma_tilde, self.Sigma_tilde, Sigma_inv = vmap(init_q_gamma, in_axes=(None, 0, 0, None, None))(self.key, self.mu, self.Sigma, self.N, self.K) # shape (T,N,K-1), (T,N,K-1,K-1), (T,K-1,K-1)
+
+            #NOTE:add multiple runs with different initializaitons and use of VMAP
+            j = 0
+            inner_d_ll = jnp.inf
+            prev_inner_ll = -jnp.inf
+            while(inner_d_ll > tol and j < max_inner_iters): # 2.2 inner loop
+                #2.2.1 update q(gamma) and q(z) 
+                self.gamma_tilde, self.Sigma_tilde, self.delta = self.inner_step(self.gamma_tilde, self.Sigma_tilde, self.mu, Sigma_inv, E)
+
+                # 2.2.2 update B
+                self.B = self.update_B(self.delta, E) # shape (K,K)
+
+                #convergence check
+                j += 1
+                inner_ll = self.log_likelihood(self.delta, self.B, E) 
+                inner_d_ll = jnp.abs(inner_ll - prev_inner_ll)
+                prev_inner_ll = inner_ll
+
+                if verbose:
+                    print(f"  [inner {j}] ll: {inner_ll:.4f}, d_ll: {inner_d_ll:.6f}")
+
+            # 2.3 RTS smoother to update mu and P
+            self.Y = jnp.mean(self.gamma_tilde, axis=1) # shape (T,K-1)
+            self.mu, self.P, self.L = self.update_mu(self.mu, self.P, self.Y, self.Sigma, self.Phi, self.N)
+
+            # 2.4 update nu, Phi, Sigma
+            self.nu = self.update_nu(self.mu) # Now (K-1,) dimensional
+            self.Phi = self.update_Phi(self.mu, self.P, self.L) # shape (K-1,K-1)
+            self.Sigma = self.update_Sigma(self.mu, self.gamma_tilde, self.Sigma_tilde, self.N) # shape (T,K-1,K-1)
+
+            #convergence check
+            i += 1
+            outer_ll = inner_ll #last inner ll is outer ll
+            d_ll = jnp.abs(outer_ll - prev_outer_ll)
+            prev_outer_ll = outer_ll
+
+        return outer_ll
+    
+    def generate_graph(self):
+        '''
+        Generate a graph from the model
+        Returns: adjacency matrix E (T,N,N)
+        '''
+        if self.B is None:
+            raise ValueError("Must initialize B before generating a graph.")
+
+        key = self.key
+        if self.gamma_tilde is None:
+            if self.nu is None or self.Phi is None or self.Sigma is None:
+                raise ValueError("Must initialize nu, Phi, and Sigma before generating a graph if gamma_tilde is not set.")
+            
+            key, subkey = jax.random.split(key)
+            mu_0 = jax.random.multivariate_normal(subkey, self.nu, self.Phi)
+
+            def sample_mu_step(carry, key_t):
+                mu_prev = carry
+                mu_t = jax.random.multivariate_normal(key_t, mu_prev, self.Phi)
+                return mu_t, mu_t
+
+            keys = jax.random.split(key, self.T - 1)
+            _, mu_rest = jax.lax.scan(sample_mu_step, mu_0, keys)
+            self.mu = jnp.concatenate([mu_0[None, :], mu_rest], axis=0)
+            
+            def sample_gamma_t(key_t, mu_t, Sigma_t):
+                return jax.random.multivariate_normal(key_t, mu_t, Sigma_t, shape=(self.N,))
+
+            key, subkey = jax.random.split(key)
+            keys = jax.random.split(subkey, self.T)
+            self.gamma_tilde = vmap(sample_gamma_t)(keys, self.mu, self.Sigma)
+        
+        gamma_expanded = vmap(self.expand_gamma)(self.gamma_tilde) # shape (T,N,K)
+        pis = softmax(gamma_expanded, axis=-1) # shape (T,N,K)
+
+        def sample_E(key, pis_t):
+            key, subkey1, subkey2, subkey3 = jax.random.split(key, 4)
+            z_ij = jax.random.multinomial(subkey1, 1, pis_t, shape=(self.N, self.N, self.K)) # shape (N,N,K)
+            z_ji = jax.random.multinomial(subkey2, 1, pis_t, shape=(self.N, self.N, self.K)) # shape (N,N,K)
+
+            p = jnp.einsum('ijk, kl -> ijl', z_ij, self.B) # shape (N,N,K)
+            p = jnp.einsum('ijl, jil -> ij', p, z_ji) # shape (N,N)
+            E_t = jax.random.bernoulli(subkey3, p=p)
+            return E_t
+    
+        E = vmap(sample_E, in_axes=(0,0))(jax.random.split(key, self.T), pis) # shape (T,N,N)
+        return E.astype(jnp.int32) # shape (T,N,N)
