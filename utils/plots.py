@@ -68,3 +68,26 @@ def plot_adjacency_matrix(adj_matrix, title=None):
     if title:
         plt.title(title)
     plt.show()
+
+def plot_gammas(true_gammas, inferred_gammas=None, title=None):
+    """
+    Plots role vectors (gammas) on a simplex (K=3 only).
+    
+    Parameters:
+    - true_gammas: Array of shape (N, K).
+    - inferred_gammas: (Optional) Array of shape (N, K).
+    - title: Optional plot title.
+    """
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+
+    ax.scatter(true_gammas[:,0], true_gammas[:,1], true_gammas[:,2], s=20, marker='o',
+               alpha=0.7, edgecolors='b', facecolors='none', label='Ground Truth')
+    if inferred_gammas is not None:
+        ax.scatter(inferred_gammas[:,0], inferred_gammas[:,1], inferred_gammas[:,2], s=20, marker='x',
+                   alpha=0.7, color='r', label='Inferred')
+        for t, inf in zip(true_gammas, inferred_gammas):
+            ax.plot([t[0], inf[0]], [t[1], inf[1]], [t[2], inf[2]], '-', c='k', alpha=0.3)
+    if title:
+        ax.set_title(title)
+    plt.show()
