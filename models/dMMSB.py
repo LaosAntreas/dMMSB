@@ -585,56 +585,6 @@ class jitdMMSB:
                 print(msg, end="\r", flush=True)    
         return outer_ll
     
-    def generate_graph(self):
-        '''
-        Generate a graph from the model
-        Returns: adjacency matrix E (T,N,N)
-        '''
-        if self.state.B is None:
-            raise ValueError("Must initialize B before generating a graph.")
-
-        key = self.state.key
-        if self.state.gamma_tilde is None:
-            if self.state.nu is None or self.state.Phi is None or self.state.Sigma is None:
-                raise ValueError("Must initialize nu, Phi, and Sigma before generating a graph if gamma_tilde is not set.")
-        
-            key, subkey = jax.random.split(key)
-            mu_0 = jax.random.multivariate_normal(subkey, self.nu, self.Phi)
-
-            def sample_mu_step(carry, key_t):
-                mu_prev = carry
-                mu_t = jax.random.multivariate_normal(key_t, mu_prev, self.Phi)
-                return mu_t, mu_t
-
-            keys = jax.random.split(key, self.T - 1)
-            _, mu_rest = jax.lax.scan(sample_mu_step, mu_0, keys)
-            mu = jnp.concatenate([mu_0[None, :], mu_rest], axis=0)
-            
-            # 2. Generate gamma_tilde using vmap
-            def sample_gamma_t(key_t, mu_t, Sigma_t):
-                return jax.random.multivariate_normal(key_t, mu_t, Sigma_t, shape=(self.N,))
-
-            key, subkey = jax.random.split(key)
-            keys = jax.random.split(subkey, self.T)
-            gamma_tilde = vmap(sample_gamma_t)(keys, self.mu, self.Sigma)
-
-            self.state = self.state.replace(gamma_tilde=gamma_tilde, mu=mu, key=key)
-
-        gamma_expanded = vmap(_expand_gamma, in_axes=(0, None))(self.state.gamma_tilde, self.state.N) # shape (T,N,K)
-        pis = softmax(gamma_expanded, axis=-1) # shape (T,N,K)
-
-        def sample_E(key, pis_t):
-            key, subkey1, subkey2, subkey3 = jax.random.split(key, 4)
-            z_ij = jax.random.multinomial(subkey1, 1, pis_t, shape=(self.state.N, self.state.N, self.state.K)) # shape (N,N,K)
-            z_ji = jax.random.multinomial(subkey2, 1, pis_t, shape=(self.state.N, self.state.N, self.state.K)) # shape (N,N,K)
-
-            p = jnp.einsum('ijk, kl -> ijl', z_ij, self.B) # shape (N,N,K)
-            p = jnp.einsum('ijl, jil -> ij', p, z_ji) # shape (N,N)
-            E_t = jax.random.bernoulli(subkey3, p=p)
-            return E_t
-    
-        E = vmap(sample_E, in_axes=(0,0))(jax.random.split(key, self.state.T), pis) # shape (T,N,N)
-        return E.astype(jnp.int32) # shape (T,N,N)
 
     def generate_graph(self):
         '''
