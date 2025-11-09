@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_roles(true_vectors, inferred_vectors=None, title=None):
+def plot_roles(true_vectors, inferred_vectors=None, title=None, filename=None):
     """
     Plots role vectors on a simplex (K=3 only).
     
@@ -50,10 +50,12 @@ def plot_roles(true_vectors, inferred_vectors=None, title=None):
     if title:
         plt.title(title)
     plt.legend()
+    if filename:
+        plt.savefig(filename, dpi=300)
     plt.show()
 
 
-def plot_adjacency_matrix(adj_matrix, title=None):
+def plot_adjacency_matrix(adj_matrix, title=None, filename=None):
     """
     Plots the adjacency matrix of a graph.
     
@@ -63,13 +65,15 @@ def plot_adjacency_matrix(adj_matrix, title=None):
     """
     assert adj_matrix.ndim == 2 and adj_matrix.shape[0] == adj_matrix.shape[1], \
         "Adjacency matrix must be square (2D)."
-    plt.figure(figsize=(6,6))
+    plt.figure(figsize=(10,10))
     plt.imshow(adj_matrix, cmap='Greys', interpolation='none')
     if title:
         plt.title(title)
+    if filename:
+        plt.savefig(filename, dpi=300)
     plt.show()
 
-def plot_gammas(true_gammas, inferred_gammas=None, title=None):
+def plot_gammas(true_gammas, inferred_gammas=None, title=None, view=None):
     """
     Plots role vectors (gammas) on a simplex (K=3 only).
     
@@ -80,7 +84,9 @@ def plot_gammas(true_gammas, inferred_gammas=None, title=None):
     """
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-
+    ax.set_xlabel('Axis 0')
+    ax.set_ylabel('Axis 1')
+    ax.set_zlabel('Axis 2')
     ax.scatter(true_gammas[:,0], true_gammas[:,1], true_gammas[:,2], s=20, marker='o',
                alpha=0.7, edgecolors='b', facecolors='none', label='Ground Truth')
     if inferred_gammas is not None:
@@ -90,4 +96,7 @@ def plot_gammas(true_gammas, inferred_gammas=None, title=None):
             ax.plot([t[0], inf[0]], [t[1], inf[1]], [t[2], inf[2]], '-', c='k', alpha=0.3)
     if title:
         ax.set_title(title)
+    if view is not None:
+        ax.view_init(elev=view[0], azim=view[1])
+    
     plt.show()

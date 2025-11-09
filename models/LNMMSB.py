@@ -18,9 +18,6 @@ import matplotlib.pyplot as plt
 
 EPS = 1e-10
 
-
-#jax.config.update("jax_disable_jit", True)  # Disable JIT for easier debugging; set to False for performance
-
 @register_pytree_node_class
 class LNMMSB_State:
     """A PyTree class to hold the state of the LNMMSB model."""
@@ -90,9 +87,9 @@ def init_LNMMSB_state(N, K, key=0, B=None, mu=None, Sigma=None):
 
 # --- Inference Functions ---
 
-def _expand_gamma(gamma_km1, N): # FIX: Corrected argument name from Ν to N
+def _expand_gamma(gamma_km1, N):
     '''
-    Help function to expand gamma from K-1 to K by appending zeros
+    Helper function to expand gamma from K-1 to K by appending zeros
     gamma_km1: (N, K-1) 
     returns: (N, K)
     '''
@@ -150,8 +147,7 @@ def update_sigma_tilde(Sigma_inv, H, N, K):
     jitter = 1e-6 * jnp.eye(K - 1) # for numerical stability
     A = A + jitter[None, :, :]
     Sigma_tilde = jnp.linalg.inv(A)
-    # cond_number = jnp.linalg.cond(A)
-    # jax.debug.print("Is Ill conditioned: {}", jnp.any(cond_number > 1e12)) #NOTE: Not ill-conditioned
+
     return Sigma_tilde
 
 def update_gamma_tilde(mu, Sigma_tilde, gamma_hat, delta, g, H, N, K):
@@ -219,15 +215,13 @@ def update_mu_sigma(gamma_tilde, Sigma_tilde, K):
     Update mu and Sigma. eq (13)
     '''
     mu = jnp.mean(gamma_tilde, axis=0) # shape (K-1,)
-
-    #plot_gammas(gamma_tilde, title="Gamma_tilde during M-step update_mu_sigma")
+    
+    expanded_gammas = _expand_gamma(gamma_tilde, gamma_tilde.shape[0])  # shape (N, K)
     avg_sigma_tilde = jnp.mean(Sigma_tilde, axis=0)  # shape (K-1,K-1)
     cov_gamma_tilde = jnp.cov(gamma_tilde, rowvar=False)  # shape (K-1,K-1)
-    # jax.debug.print("Covariance of gamma_tilde: {}", cov_gamma_tilde)
-    # jax.debug.print("avg Sigma_tilde: {}", avg_sigma_tilde)
     
     updated_Sigma = avg_sigma_tilde + cov_gamma_tilde # shape (K-1,K-1)
-    jitter = 1e-2 * jnp.eye(K - 1) # for numerical stability
+    jitter = 1e-6 * jnp.eye(K - 1) # for numerical stability
     updated_Sigma += jitter
 
     return mu, updated_Sigma
@@ -282,8 +276,6 @@ def inner_loop(state: LNMMSB_State, Sigma_inv, E, max_inner_iters=100, tol=1e-6)
         inner_ll = log_likelihood(state.delta, state.B, E) 
         inner_d_ll = jnp.abs(inner_ll - prev_inner_ll)
         prev_inner_ll = inner_ll
-
-        #jax.debug.print("Inner iter: {}, ll: {:.4f}, d_ll: {:.6f}", j, inner_ll, inner_d_ll)
 
         return (state, j, inner_d_ll, prev_inner_ll)
 
@@ -355,7 +347,7 @@ def find_best_initialization(state: LNMMSB_State, E, trials=5):
 
 # --- Public API ---
 
-class jitLNMMSB:
+class LNMMSB:
     """A JAX-accelerated implementation of the LNMMSB model."""
     
     def __init__(self, nodes, roles, **kwargs):
@@ -372,7 +364,7 @@ class jitLNMMSB:
         max_outer_iters: maximum iterations for the outer loop
         tol: convergence tolerance
         verbose: whether to print progress
-        Returns: final log likelihood
+        Returns: final log likelihood or -inf if not converged
         '''
         assert E.shape == (self.N, self.N), f"Expected E shape {(self.N, self.N)}, got {E.shape}"
         assert jnp.all(jnp.isin(E, jnp.array([0, 1]))), "E must be a binary adjacency matrix."
@@ -383,7 +375,7 @@ class jitLNMMSB:
 
         # Multiple random initializations to avoid poor local minima
 
-        initial_state, outer_ll = find_best_initialization(self.state, E, trials=50)
+        initial_state, outer_ll = find_best_initialization(self.state, E, trials=5)
         self.state = initial_state
         
         if verbose:
@@ -397,15 +389,6 @@ class jitLNMMSB:
 
             #Inner loop (E-step)
             self.state, inner_ll = inner_loop(self.state, Sigma_inv, E, max_inner_iters, tol)
-
-            jax.debug.print("Model State:")
-            jax.debug.print("B: {}", self.state.B)
-            jax.debug.print("mu: {}", self.state.mu)
-            jax.debug.print("Sigma: {}", self.state.Sigma)  
-            jax.debug.print("Check constraints")
-            jax.debug.print("Sigma positive definite: {}", jnp.all(jnp.linalg.eigvals(self.state.Sigma) > 0.0))
-            jax.debug.print("Sigma dilatation positive definite: {}", jnp.all(jnp.linalg.eigvals(self.state.Sigma_tilde) > 0.0))
-
 
             #M-step
             self.state = m_step_update(self.state)
@@ -421,7 +404,12 @@ class jitLNMMSB:
                 else:
                     print(msg, end="\r", flush=True)
 
+        if (i == max_outer_iters) and (d_ll > tol):
+            if verbose:
+                print("\nWarning: dMMSB fit did not converge within the maximum number of outer iterations.")
+            outer_ll = -jnp.inf # Indicate non-convergence with -inf log-likelihood
         return outer_ll
+    
 
     def generate_graph(self):
         '''
